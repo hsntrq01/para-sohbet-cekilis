@@ -2,6 +2,7 @@
 import os
 import random
 import logging
+import html
 from datetime import datetime, timedelta, timezone
 
 from telegram import (
@@ -23,23 +24,45 @@ TOKEN = os.environ["BOT_TOKEN"]
 active_giveaways = {}
 
 
+def giveaway_text(giveaway):
+    return (
+        "🎁 ÇEKİLİŞ BAŞLADI!\n\n"
+        f"🏆 Ödül: {giveaway['prize']}\n"
+        f"👥 Kazanan sayısı: {giveaway['winners_count']}\n"
+        f"⏳ Süre: {giveaway['minutes']} dakika\n"
+        f"👤 Katılımcı: {len(giveaway['participants'])}\n\n"
+        "Katılmak için aşağıdaki butona bas!"
+    )
+
+
+def giveaway_keyboard(giveaway):
+    count = len(giveaway["participants"])
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            f"🎉 Çekilişe Katıl ({count})",
+            callback_data="join_giveaway",
+        )
+    ]])
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎉 Para Kazandıran Sohbet Çekiliş Botu\n\n"
-        "Grubunda çekiliş başlatmak için /cekilis komutunu kullan."
+        "Çekiliş başlatmak için grupta /cekilis yaz."
     )
 
 
 async def cekilis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    member = await context.bot.get_chat_member(chat.id, user.id)
 
     if chat.type == "private":
         await update.message.reply_text(
             "Bu komutu grubunda kullanmalısın."
         )
         return
+
+    member = await context.bot.get_chat_member(chat.id, user.id)
 
     if member.status not in ("administrator", "creator"):
         await update.message.reply_text(
@@ -49,62 +72,53 @@ async def cekilis(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chat.id in active_giveaways:
         await update.message.reply_text(
-            "Önce mevcut çekilişin bitmesini bekle."
+            "❌ Bu grupta zaten aktif bir çekiliş var."
         )
         return
 
-    # Kullanım: /cekilis 10 1 100 USDT
-    # 10 = dakika, 1 = kazanan sayısı, 100 USDT = ödül
     args = context.args
-    if len(args) < 4:
+
+    if len(args) < 3:
         await update.message.reply_text(
-            "Kullanım:\n/cekilis 10 1 100 USDT\n\n"
-            "Örnek: 10 dakika, 1 kazanan, 100 USDT ödül."
+            "Kullanım: /cekilis 10 1 100 USDT\n"
+            "10 = dakika, 1 = kazanan sayısı."
         )
         return
 
     try:
         minutes = int(args[0])
         winners_count = int(args[1])
-        prize = " ".join(args[2:])
+
         if not 1 <= minutes <= 10080:
             raise ValueError
         if not 1 <= winners_count <= 100:
             raise ValueError
+
+        prize = " ".join(args[2:])
+
     except ValueError:
         await update.message.reply_text(
-            "Süre ve kazanan sayısı geçerli pozitif sayılar olmalı."
+            "❌ Süre ve kazanan sayısı geçersiz."
         )
         return
 
-    ends_at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
-
-    active_giveaways[chat.id] = {
-        "participants": set(),
+    giveaway = {
+        "participants": {},
         "winners_count": winners_count,
         "prize": prize,
-        "ends_at": ends_at,
-        "message_id": None,
+        "minutes": minutes,
+        "ends_at": datetime.now(timezone.utc)
+        + timedelta(minutes=minutes),
     }
 
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            "🎉 Çekilişe Katıl (0)",
-            callback_data="join_giveaway",
-        )
-    ]])
+    active_giveaways[chat.id] = giveaway
 
     message = await update.message.reply_text(
-        f"🎁 ÇEKİLİŞ BAŞLADI!\n\n"
-        f"🏆 Ödül: {prize}\n"
-        f"👥 Kazanan sayısı: {winners_count}\n"
-        f"⏳ Süre: {minutes} dakika\n"
-        f"👤 Katılımcı: 0\n\n"
-        f"Katılmak için aşağıdaki butona bas!",
-        reply_markup=keyboard,
+        giveaway_text(giveaway),
+        reply_markup=giveaway_keyboard(giveaway),
     )
 
-    active_giveaways[chat.id]["message_id"] = message.message_id
+    giveaway["message_id"] = message.message_id
 
     context.job_queue.run_once(
         finish_giveaway,
@@ -125,26 +139,34 @@ async def join_giveaway(
     giveaway = active_giveaways.get(chat_id)
 
     if not giveaway:
-        await query.answer("Bu çekiliş aktif değil.", show_alert=True)
-        return
-
-    user_id = query.from_user.id
-
-    if user_id in giveaway["participants"]:
-        await query.answer("Zaten katıldın! 🎉", show_alert=True)
-        return
-
-    giveaway["participants"].add(user_id)
-    count = len(giveaway["participants"])
-
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            f"🎉 Çekilişe Katıl ({count})",
-            callback_data="join_giveaway",
+        await query.answer(
+            "Bu çekiliş artık aktif değil.",
+            show_alert=True,
         )
-    ]])
+        return
 
-    await query.edit_message_reply_markup(reply_markup=keyboard)
+    user = query.from_user
+
+    if user.id in giveaway["participants"]:
+        await query.answer(
+            "Zaten çekilişe katıldın! 🎉",
+            show_alert=True,
+        )
+        return
+
+    giveaway["participants"][user.id] = {
+        "name": user.full_name,
+        "username": user.username,
+    }
+
+    try:
+        await query.edit_message_text(
+            text=giveaway_text(giveaway),
+            reply_markup=giveaway_keyboard(giveaway),
+        )
+    except Exception:
+        log.exception("Çekiliş mesajı güncellenemedi.")
+
     await query.answer("Çekilişe katıldın! 🎉")
 
 
@@ -155,25 +177,44 @@ async def finish_giveaway(context: ContextTypes.DEFAULT_TYPE):
     if not giveaway:
         return
 
-    participants = list(giveaway["participants"])
-    count = min(giveaway["winners_count"], len(participants))
+    participants = list(giveaway["participants"].items())
+    winner_count = min(
+        giveaway["winners_count"],
+        len(participants),
+    )
 
-    if count == 0:
+    if winner_count == 0:
         result = (
             "🎁 ÇEKİLİŞ SONA ERDİ!\n\n"
-            f"🏆 Ödül: {giveaway['prize']}\n"
+            f"🏆 Ödül: {html.escape(giveaway['prize'])}\n"
             "Katılımcı olmadığı için kazanan seçilemedi."
         )
     else:
-        winners = random.SystemRandom().sample(participants, count)
+        winners = random.SystemRandom().sample(
+            participants,
+            winner_count,
+        )
+
         lines = []
-        for i, user_id in enumerate(winners, 1):
-            lines.append(f"{i}. <a href=\"tg://user?id={user_id}\">Kazanan</a>")
+
+        for index, (user_id, info) in enumerate(winners, 1):
+            if info["username"]:
+                name = "@" + html.escape(info["username"])
+            else:
+                safe_name = html.escape(info["name"])
+                name = (
+                    f'<a href="tg://user?id={user_id}">'
+                    f'{safe_name}</a>'
+                )
+
+            lines.append(f"{index}. {name}")
+
         result = (
             "🎉 ÇEKİLİŞ SONA ERDİ!\n\n"
-            f"🏆 Ödül: {giveaway['prize']}\n"
+            f"🏆 Ödül: {html.escape(giveaway['prize'])}\n"
             f"👥 Katılımcı: {len(participants)}\n\n"
-            "🏅 Kazananlar:\n" + "\n".join(lines)
+            "🏅 KAZANANLAR:\n"
+            + "\n".join(lines)
         )
 
     await context.bot.send_message(
@@ -185,11 +226,16 @@ async def finish_giveaway(context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cekilis", cekilis))
     app.add_handler(
-        CallbackQueryHandler(join_giveaway, pattern="^join_giveaway$")
+        CallbackQueryHandler(
+            join_giveaway,
+            pattern="^join_giveaway$",
+        )
     )
+
     log.info("Çekiliş botu başlatılıyor.")
     app.run_polling()
 
